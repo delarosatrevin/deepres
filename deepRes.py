@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """/***************************************************************************
  *
- * Authors:     Erney Ramirez Aportela
+ * Authors:     Erney Ramirez Aportela (CSIC)
  *
- * CSIC
+ *  Updated by: 
+ *         J.M. de la Rosa Trevin (2024-03-28)
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -22,6 +23,8 @@
  *
  *  All comments concerning this program package may be sent to the
  *  e-mail address 'xmipp@cnb.csic.es'
+
+ *
  ***************************************************************************/
 """
 
@@ -32,8 +35,8 @@ import numpy as np
 import os
 import sys
 import argparse
-import xmippLib
-from xmipp_base import XmippScript
+
+import mrcfile
 
 # The method accepts as input a 3D crioEM map and the mask
 # both with sampling rate of 1 A/pixel for network 1 or 0.5 A/pixel for network 2
@@ -46,11 +49,11 @@ def getBox(V,z,y,x):
     boxDim2 = boxDim//2
     box = V[z-boxDim2:z+boxDim2+1,y-boxDim2:y+boxDim2+1,x-boxDim2:x+boxDim2+1]
     box = box/np.linalg.norm(box)
-    return box 
+    return box
 
 def getDataIfFname(fnameOrNumpy):
   if isinstance(fnameOrNumpy, str):
-    return xmippLib.Image(fnameOrNumpy).getData()
+    raise Exception("Pass numpy data as input")
   elif isinstance(fnameOrNumpy, np.ndarray):
     return fnameOrNumpy
   else:
@@ -118,22 +121,17 @@ class VolumeManager(Sequence):
             ok=self.advancePos()
         return ok 
 
-
     def __getitem__(self,idx):
-        count=0;
+        count = 0
         batchX = []
         ok = True 
-        while (count<maxSize and ok):
+        while count < maxSize and ok:
             batchX.append(getBox(self.V, self.z, self.y, self.x))
-            #print (count   ,    self.x   ,   self.y  ,  self.z)
-            ok=self.advance()
-            count+=1
-        batchX=np.asarray(batchX).astype("float32")
-        #print("count = ", count) 
-        batchX = batchX.reshape(count, batchX.shape[1], batchX.shape[2], batchX.shape[3], 1)      
-
-        #print("batchX.shape = ", batchX.shape)
-        return (batchX)
+            ok = self.advance()
+            count += 1
+        batchX = np.asarray(batchX).astype("float32")
+        batchX = batchX.reshape(count, batchX.shape[1], batchX.shape[2], batchX.shape[3], 1)
+        return batchX
    
 
 
@@ -211,48 +209,50 @@ def produceOutput(fnVolInOrNumpy, fnMaskOrNumpy, model, sampling, Y, fnVolOut):
                           meansum=col/ct
                           V[z,y,x]=meansum         
 
-
     if fnVolOut is not None:
-      Vxmipp = xmippLib.Image()
-      Vxmipp.setData(V)
-      Vxmipp.write(fnVolOut)
-    return V
+        with mrcfile.open(fnVolOut, mode='w+') as mrc:
+            mrc.set_data(V)
+
 
 def main(fnModel, fnVolIn, fnMask, sampling, fnVolOut):
+    model = load_model(fnModel)
 
-  if fnModel=="default":
-    fnModel= XmippScript.getModel("deepRes", "model_w13.h5")
-  elif fnModel=="highRes":
-    fnModel= XmippScript.getModel("deepRes", "model_w7.h5")
+    mrcVol = mrcfile.open(fnVolIn)
+    mrcMask = mrcfile.open(fnMask)
 
-  model = load_model(fnModel)
-  manager = VolumeManager(fnVolIn, fnMask)
-  Y = model.predict_generator(manager, manager.getNumberOfBlocks())
+    manager = VolumeManager(mrcVol.data, mrcMask.data)
+    Y = model.predict_generator(manager, manager.getNumberOfBlocks())
 
-  if fnModel == XmippScript.getModel("deepRes", "model_w13.h5"):
-    model = 1
-  if fnModel == XmippScript.getModel("deepRes", "model_w7.h5"):
-    model = 2
-  return produceOutput(fnVolIn, fnMask, model, sampling, Y, fnVolOut)
+    modelName = os.path.basename(fnModel)
+    if modelName.endswith("model_w13.h5"):
+        model = 1
+    elif modelName.endswith("model_w7.h5"):
+        model = 2
+
+    produceOutput(mrcVol.data, mrcMask.data, model, sampling, Y, fnVolOut)
 
 
-if __name__=="__main__":
-    from xmippPyModules.deepLearningToolkitUtils.utils import checkIf_tf_keras_installed
-    checkIf_tf_keras_installed()
-    parser = argparse.ArgumentParser(description="determine the local resoluction")
-    parser.add_argument("-dl", "--dl_model", help="input deep learning model", required=True)
-    parser.add_argument("-i", "--map", help="input map", required=True)
-    parser.add_argument("-m", "--mask", help="input mask", required=True)
-    parser.add_argument("-s", "--sampling", help="sampling rate", required=True)
-    parser.add_argument("-o", "--output", help="output resolution map", required=True)   
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Determine local resolution "
+                                                 "of the input map")
+    parser.add_argument("-dl", "--dl_model",
+                        help="input deep learning model", required=True)
+    parser.add_argument("-i", "--map",
+                        help="input map", required=True)
+    parser.add_argument("-m", "--mask",
+                        help="input mask", required=True)
+    parser.add_argument("-s", "--sampling",
+                        help="sampling rate", required=True, type=float)
+    parser.add_argument("-o", "--output",
+                        help="output resolution map", required=True)
     args = parser.parse_args()
 
     fnModel = args.dl_model
     fnVolIn = args.map 
-    fnMask  = args.mask
+    fnMask = args.mask
     sampling = float(args.sampling)
     fnVolOut = args.output
 
-    main(fnModel, fnVolIn, fnMask, sampling, fnVolOut)
+    main(args.dl_model, args.map, args.mask, args.sampling, args.output)
 
 
